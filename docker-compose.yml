@@ -1,0 +1,33 @@
+services:
+  llama-server:
+    image: llama-cpp-mtp:vulkan          # custom build with draft-mtp support
+    container_name: llama-server
+    restart: unless-stopped
+    ports:
+      - "30001:8080"
+    volumes:
+      - /path/to/your/models:/models     # change to your model directory
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      - GGML_VK_VISIBLE_DEVICES=0
+      - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json
+    command: >
+      --model /models/Qwen3.6-27B-Q4_K_M.gguf
+      --alias Qwen3.6-27B-Q4K_M
+      --host 0.0.0.0
+      --port 8080
+      --n-gpu-layers 999
+      --ctx-size 204800
+      --parallel 1
+      --flash-attn on
+      -b 16384
+      -ub 2048
+      --cache-type-k q4_0
+      --cache-type-v q4_0
+      --spec-type draft-mtp
+      --spec-draft-n-max 3
+      --api-key your-api-key
+      --metrics
