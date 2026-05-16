@@ -1,7 +1,7 @@
-# llama.cpp AMD RDNA4 Vulkan + MTP Optimization Guide
+# AMD Radeon AI PRO R9700 / RX 9700 — llama.cpp Vulkan + MTP Optimization Guide
 
-> AMD Radeon AI PRO R9700 / RX 9700 系列 — Vulkan 推理 + MTP 投机解码优化指南  
-> AMD Radeon AI PRO R9700 / RX 9700 series — Vulkan inference + MTP speculative decoding
+> RDNA4 (gfx1201) Vulkan 推理 + MTP 投机解码优化指南 | 44–48 tok/s · 95%+ 接受率  
+> RDNA4 (gfx1201) Vulkan inference + MTP speculative decoding | 44–48 tok/s · 95%+ acceptance rate
 
 [![GPU](https://img.shields.io/badge/GPU-AMD%20RDNA4%20gfx1201-red)](https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/r9700.html)
 [![Backend](https://img.shields.io/badge/Backend-Vulkan%20%2B%20MTP-blue)](https://github.com/ggml-org/llama.cpp)
