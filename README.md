@@ -1,9 +1,9 @@
 # AMD Radeon AI PRO R9700 / RX 9700 — llama.cpp Vulkan + MTP Optimization Guide
 
-> RDNA4 (gfx1201) Vulkan 推理 + MTP 投机解码优化指南 | 44–48 tok/s · 95%+ 接受率  
-> RDNA4 (gfx1201) Vulkan inference + MTP speculative decoding | 44–48 tok/s · 95%+ acceptance rate
+> RDNA4 (gfx1201) Vulkan 推理 + MTP 投机解码优化指南  
+> RDNA4 (gfx1201) Vulkan inference + MTP speculative decoding
 
-[![GPU](https://img.shields.io/badge/GPU-AMD%20RDNA4%20gfx1201-red)](https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/r9700.html)
+[![GPU](https://img.shields.io/badge/GPU-AMD%20Radeon%20AI%20PRO%20R9700-red)](https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/r9700.html)
 [![Backend](https://img.shields.io/badge/Backend-Vulkan%20%2B%20MTP-blue)](https://github.com/ggml-org/llama.cpp)
 [![Model](https://img.shields.io/badge/Model-Qwen3.6--27B-green)](https://huggingface.co/Qwen)
 
@@ -16,7 +16,7 @@
 | GPU | AMD Radeon AI PRO R9700 — 32GB GDDR6, 256-bit bus (~576 GB/s) |
 | CPU | AMD Ryzen 7 5700X |
 | OS | Ubuntu 24.04 |
-| Driver | RADV (Mesa 26.0.3 in Docker) |
+| Driver | RADV Mesa 26.0.3 (inside Docker) |
 | llama.cpp | Custom build with `draft-mtp` ([gg/spec-mtp-experiments](https://github.com/ggml-org/llama.cpp/tree/gg/spec-mtp-experiments)) |
 | Model | Qwen3.6-27B-Q4_K_M |
 
@@ -27,8 +27,8 @@
 | Metric / 指标 | Result / 结果 |
 |---|---|
 | tg — no MTP / 不开MTP | ~20 tok/s |
-| **tg — with MTP / 开MTP** | **44–48 tok/s (~2× speedup)** |
-| pp (945 tokens) | ~470–560 tok/s |
+| **tg — with MTP / 开MTP** | **~42 tok/s (~2× speedup)** |
+| pp (1226 tokens, ctx=204800) | **~525 tok/s** |
 | MTP acceptance rate / MTP接受率 | 95–97% |
 
 > R9700 AI 虽然是专为AI设计的新卡（1531 TOPS INT4），但LLM的token生成是**内存带宽瓶颈**而非算力瓶颈。256-bit内存总线限制了自回归推理的原始速度。MTP通过每次验证接受约2个token，将有效带宽需求减半，是最有效的提速手段。
@@ -59,14 +59,18 @@ llama-server \
   --n-gpu-layers 999 \
   --ctx-size 204800 \
   --parallel 1 \           # MTP requires single sequence / MTP必须单序列
-  --flash-attn on \
-  -b 16384 \               # large batch for prefill boost / 大批次显著提升pp
+  --flash-attn on \        # required with large -b for good pp / 大批次时必须开启
+  -b 16384 \               # flash-attn REQUIRES large batch to be efficient / 无大批次flash-attn反而拖慢pp
   -ub 2048 \
   --cache-type-k q4_0 \
   --cache-type-v q4_0 \
   --spec-type draft-mtp \  # built-in MTP heads / 使用模型内置MTP头
   --spec-draft-n-max 3     # draft 3 tokens per step
 ```
+
+> ⚠️ **Critical pairing / 关键组合**: `--flash-attn on` MUST be used together with `-b 16384`. Without the large batch, flash-attn alone drops pp from 525 → 147 tok/s. Without flash-attn but with large batch, pp also drops to ~133 tok/s. Only the combination gives full performance.
+>
+> `--flash-attn on` **必须**与 `-b 16384` 同时使用。缺少大批次时，单独开 flash-attn 会让 pp 从 525 降到 147 tok/s。
 
 ### Docker environment / Docker环境变量
 
@@ -86,9 +90,11 @@ See [`docker-compose.yml`](docker-compose.yml) for a complete ready-to-use examp
 
 | Optimization / 项目 | Result / 结果 | Reason / 原因 |
 |---|---|---|
+| `--flash-attn on` alone (without `-b 16384`) | pp **-72%** (525→147) | flash-attn on RDNA4 Vulkan needs large batch to be efficient / RDNA4 Vulkan 的 flash-attn 必须搭配大批次 |
+| `-b 16384` alone (without flash-attn) | pp **-75%** (525→133) | large batch without flash-attn also hurts pp / 无 flash-attn 时大批次同样拖慢 pp |
 | `GGML_VK_ALLOW_GRAPHICS_QUEUE=1` | **-8% decode** | Dense模型下反而变慢，仅对MoE有效 |
-| AMDVLK driver | tg +12% but pp **-75%** | prefill 从 ~560 降至 ~130 tok/s，chat场景不划算 |
-| ROCm backend (HIP) | **~33 tok/s** vs Vulkan 44–48 | RDNA4上ROCm HIP kernel效率不如RADV Vulkan |
+| AMDVLK driver | tg +12% but pp **-75%** | prefill 从 ~525 降至 ~130 tok/s，chat场景不划算 |
+| ROCm backend (HIP) | **~33 tok/s** vs Vulkan ~42 | RDNA4上ROCm HIP kernel效率不如RADV Vulkan |
 | Turboquant (turbo2/3/4) | slower than q4_0 | CPU成为反量化瓶颈，GPU利用率仅约30% |
 | `rm_kq=1` source change | +0.8% (RADV) | 收益极小，需重新编译整个Docker镜像 |
 | RADV debug / perf env vars | no impact | 测试了多种 RADV_PERFTEST 变量，均无效果 |
@@ -102,9 +108,10 @@ See [`docker-compose.yml`](docker-compose.yml) for a complete ready-to-use examp
 |---|---|---|---|
 | PCIe ASPM performance | +~10% | +~10% | Free, system-level |
 | GPU power high | stabilizes | stabilizes | Prevents throttle |
-| `-b 16384 -ub 2048` | negligible | **significant** | Main pp boost |
+| `--flash-attn on` + `-b 16384 -ub 2048` | negligible | **significant** | Must use together — either alone hurts pp |
 | MTP `spec-draft-n-max 3` + `parallel 1` | **~2×** | — | Biggest single gain |
 | `VK_ICD_FILENAMES` | minor | minor | Deterministic driver selection |
+| Mesa 26.0.3 in Docker | better flash-attn | better overall | System Mesa 25.x gives very different results |
 
 ---
 
@@ -119,6 +126,8 @@ cd llama.cpp
 cmake -B build -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc) --target llama-server
 ```
+
+> Note: Mesa version matters. The Docker image ships Mesa 26.0.3 which gives significantly better results than Ubuntu 24.04's default Mesa 25.x. If building natively, performance may differ from Docker benchmarks.
 
 See [`scripts/build-vulkan-mtp.sh`](scripts/build-vulkan-mtp.sh) for the full script.
 
