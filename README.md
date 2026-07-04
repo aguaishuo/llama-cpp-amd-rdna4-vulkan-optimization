@@ -1,8 +1,8 @@
 # AMD Radeon AI PRO R9700 / RX 9700 — llama.cpp Vulkan Inference Optimization Guide
 
-> RDNA4 (gfx1201) Vulkan 推理优化指南 — benchmark results, tuning parameters & optimization strategies
+> RDNA4 (gfx1201) Vulkan 推理优化指南 — 覆盖 27B Dense + 35B MoE 两种模型架构
 >
-> RDNA4 (gfx1201) Vulkan inference + optimization guide — benchmark results, tuning parameters & optimization strategies
+> RDNA4 (gfx1201) Vulkan inference optimization guide — covering 27B Dense + 35B MoE architectures
 
 [![GPU](https://img.shields.io/badge/GPU-AMD%20Radeon%20AI%20PRO%20R9700-red)](https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/r9700.html)
 [![Backend](https://img.shields.io/badge/Backend-Vulkan-blue)](https://github.com/ggml-org/llama.cpp)
@@ -25,122 +25,98 @@
 
 ## Models Tested / 已测试模型
 
-| Model | Size | Quant | File Size | MoE active params |
-|---|---|---|---|---|
-| Qwen3-30B-A3B | 30.53B total | Q4_K_M | ~17.3 GiB | ~5.9B per token |
-| Qwen3.6-35B-A3B | 35.51B total | Q4_K | ~20.2 GiB | ~6.5B per token |
-| Qwen3.6-27B | 27B dense | Q4_K_M | ~16.3 GiB | 27B (dense) |
-
-> Thanks [Zedbytes](https://github.com/ggml-org/llama.cpp/discussions/19890) for the original 30B-A3B benchmarks on R9700 — the data informed many of the optimizations here.
+| Model | Architecture | Size | Quant | File Size | Effective params/token |
+|---|---|---|---|---|---|
+| Qwen3.6-27B | Dense | 27B | Q4_K_M | ~16.3 GiB | 27B (full) |
+| Qwen3-30B-A3B | MoE | 30.53B total | Q4_K_M | ~17.3 GiB | ~5.9B |
+| Qwen3.6-35B-A3B | MoE | 35.51B total | Q4_K | ~20.2 GiB | ~6.5B |
 
 ---
 
 ## Benchmark Results / 测试结果
 
-### To reproduce locally / 本地重现
+### 1️⃣ Qwen3.6-27B Q4_K_M — Dense Model
+
+> **Optimization path: MTP speculative decoding** — the R9700's 256-bit bus is the bottleneck for dense 27B. MTP boosts effective throughput by accepting ~2 tokens per step. This was the original optimization explored in the project.
+
+#### Before optimization (old llama.cpp, no MTP, old Mesa)
+
+| Test | t/s | Notes |
+|---|---|---|
+| tg (no MTP) | ~20 | Memory-bandwidth bound dense model |
+| pp (1226 tokens) | ~525 | |
+
+#### After optimization (MTP enabled, `-b 16384 -ub 2048`, `--flash-attn on`)
+
+| Test | t/s | Speedup |
+|---|---|---|
+| **tg (MTP enabled)** | **~42** | **~2× vs no MTP** |
+| pp (1226 tokens, ctx 204800) | ~525 | same |
+| MTP acceptance rate | 95–97% | Consistently high |
+
+#### Optimal llama-server flags (27B)
 
 ```bash
-git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-cmake -B build-vk -DGGML_VULKAN=ON -DGGML_CPU=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vk -j$(nproc) --target llama-bench
-
-RADV_DEBUG=nocompute GGML_VK_VISIBLE_DEVICES=0 \
-  ./build-vk/bin/llama-bench \
-    -m /path/to/model.gguf \
-    -n 512 -p 32 -ngl 999 -fa 1 -b 4096 -ub 512 -r 3
+llama-server \
+  --model Qwen3.6-27B-Q4_K_M.gguf \
+  --n-gpu-layers 999 \
+  --ctx-size 204800 \
+  --parallel 1 \             # MTP requires single sequence
+  --flash-attn on \          # required with large -b
+  -b 16384 \                 # flash-attn REQUIRES large batch
+  -ub 2048 \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --spec-type draft-mtp \    # built-in MTP heads
+  --spec-draft-n-max 3       # draft 3 tokens per step
 ```
 
-### Latest Results (llama.cpp master build 9870, Jul 2026)
-
-#### Qwen3.6-35B-A3B Q4_K (20.21 GiB, 35B-class MoE)
-
-`RADV_DEBUG=nocompute` | `KHR_cooperative_matrix` | `flash-attn on`
-
-| Test | tokens/s | Notes |
-|---|---|---|
-| **tg128** | **164.6 ± 3.1** | **Fastest recorded R9700 35B result** |
-| **tg512** | **164.6 ± 3.1** | Stable across batch sizes |
-| tg2048 | 165.0 ± 0.2 | Decode speed unchanged |
-| pp32 | 521.6 ± 38.7 | Prefill (short) |
-| pp512 | 2901.2 ± 97.8 | Prefill (medium) |
-
-#### Qwen3-30B-A3B Q4_K_M (~17.3 GiB, 30B-class MoE)
-
-(From community benchmarks on same hardware)
-
-| Test | tokens/s | Notes |
-|---|---|---|
-| **tg128** | **183.5 ± 1.0** | ~86% bandwidth utilization |
-| pp512 | 3032.6 ± 23.5 | Prefill |
-| pp1024 | 3009.0 ± 25.2 | Prefill |
+> ⚠️ **Critical pairing**: `--flash-attn on` MUST be used with `-b 16384`. Without the large batch, flash-attn drops pp from 525 → 147. Without flash-attn but with large batch, pp also drops to ~133. Only the combination works.
 
 ---
 
-## Optimization Timeline / 优化历程
+### 2️⃣ Qwen3.6-35B-A3B Q4_K — MoE Model
 
-The R9700's raw decode for 35B-class MoE models improved dramatically over the discussion thread's lifecycle:
+> **Optimization path: RADV_DEBUG=nocompute + latest llama.cpp** — MoE's sparse activation (~6.5B/token) means MTP is unnecessary. The bottleneck is kernel dispatch overhead on RDNA4, solved by `RADV_DEBUG=nocompute`.
 
-| Stage | 35B tg (t/s) | What changed |
+`RADV_DEBUG=nocompute` | `KHR_cooperative_matrix` | `flash-attn on` | No MTP
+
+#### llama-bench results (build 9870)
+
+| Test | t/s | Notes |
+|---|---|---|
+| **tg128** | **164.6 ± 3.1** | **Fastest recorded R9700 35B result** |
+| tg512 | 164.6 ± 3.1 | Stable across batch sizes |
+| tg2048 | 165.0 ± 0.2 | Decode speed virtually unchanged |
+| pp32 | 521.6 ± 38.7 | Short prefill |
+| pp512 | 2901.2 ± 97.8 | Medium prefill |
+
+#### Real server benchmark (OpenAI-compatible API)
+
+| Run | Predicted t/s | Tokens |
+|---|---|---|
+| Run 1 | 135.4 | 36 |
+| Run 2 | 130.8 | 36 |
+| Run 3 | 137.9 | 36 |
+| **Average** | **~138** | |
+
+#### Optimization Timeline (35B MoE)
+
+| Stage | tg (t/s) | What changed |
 |---|---|---|
 | Initial (first report) | ~93 | Default llama.cpp settings |
 | Master branch update | ~105 | Updated to latest llama.cpp |
 | `RADV_DEBUG=nocompute` | ~127 | Disabled compute queue for RDNA4 |
-| `KHR_cooperative_matrix` support | **~138** | Official deployment speed (llama-server API) |
-| llama-bench optimized | **~165** | Benchmark peak with latest build |
+| `KHR_cooperative_matrix` support | **~138** | Official deployment speed (API) |
+| llama-bench peak | **~165** | Benchmark peak with latest build |
 
 > From ~93 to ~165 t/s — **~77% improvement** through software optimizations alone.
 
----
-
-## ✅ Optimizations That Work / 有效的优化项
-
-### Must-have: `RADV_DEBUG=nocompute`
-
-**The single most impactful setting for RDNA4 gfx1201 Vulkan inference.** This environment variable disables compute queue usage and routes all work through the graphics queue, which on RADV for RDNA4 avoids a performance regression in certain kernel dispatch paths.
-
-```yaml
-environment:
-  - GGML_VK_VISIBLE_DEVICES=0
-  - RADV_DEBUG=nocompute
-```
-
-Without this: ~120 t/s → With this: **~138 t/s** (+15%)
-
-### Use latest llama.cpp master
-
-The `KHR_cooperative_matrix` extension support in the Vulkan backend was added in recent llama.cpp builds. The Docker image should be rebuilt periodically against the latest master.
-
-Older builds (e.g. May 2026) without this support benchmark at ~117-120 t/s vs **~165 t/s** with the latest master.
-
-### System-level / 系统级
-
-```bash
-# PCIe ASPM performance mode — +~10% decode
-echo performance | sudo tee /sys/module/pcie_aspm/parameters/policy
-
-# GPU power to high — stable clock speed
-echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
-```
-
-> Note: resets on reboot. See [`scripts/system-optimize.sh`](scripts/system-optimize.sh) for a persistent setup.
-
-### Docker container: pass host Mesa Vulkan drivers
-
-Mount the host's `/dev/dri` and use the same Mesa version as the host for best compatibility:
-
-```yaml
-devices:
-  - /dev/dri:/dev/dri
-group_add:
-  - video
-```
-
-### llama-server flags / 推理参数 (35B MoE)
+#### Optimal llama-server flags (35B MoE)
 
 ```bash
 llama-server \
-  --model Huihui-Qwen3.6-35B-A3B-Q4_K.gguf \
+  --model Qwen3.6-35B-A3B-Q4_K.gguf \
   --n-gpu-layers 999 \
   --ctx-size 32768 \
   --flash-attn on \
@@ -150,28 +126,112 @@ llama-server \
   --cache-type-v q4_0
 ```
 
-> For 35B MoE models, `-b 4096 -ub 512` is optimal. MTP (`--spec-type draft-mtp`) showed **no benefit** on 35B-A3B and actually regressed performance (~105 vs ~138 t/s), so it is not recommended for this model.
-
-### Dual GPU: R9700 × 2
-
-(From community reports) Two R9700s in x8/x8 PCIe split:
-- pp (prefill): **+36%**
-- tg (decode): **-25%** (bandwidth split across PCIe hurts MoE decode)
-
-**Recommendation: single R9700 for MoE models.**
+> For 35B MoE, `-b 4096 -ub 512` is optimal. MTP (`--spec-type draft-mtp`) regresses performance to ~105 t/s and is **not recommended** for MoE.
 
 ---
 
-## ❌ Optimizations That Don't Work / 无效或负优化项 (35B MoE)
+### 3️⃣ Qwen3-30B-A3B Q4_K_M — MoE Model (Community Data)
 
-| Optimization / 项目 | Result / 结果 | Reason / 原因 |
+From [llama.cpp discussion #19890](https://github.com/ggml-org/llama.cpp/discussions/19890) benchmarks on the same hardware:
+
+| Test | t/s | Notes |
 |---|---|---|
-| **MTP (`--spec-type draft-mtp`)** | tg **-24%** (~105 vs ~138) | 35B-A3B MTP head adds overhead without acceptance gain; only useful on dense 27B model |
-| AMDVLK driver | pp degrades | prefill drops significantly, not recommended for chat workloads |
-| ROCm backend (HIP) | Slower than Vulkan | RDNA4 RADV Vulkan outperforms ROCm HIP by ~20% on this arch |
-| Turboquant (turbo2/3/4) | Slower than q4_0 | CPU becomes decompression bottleneck, GPU utilization drops to ~30% |
-| `GGML_VK_ALLOW_GRAPHICS_QUEUE=1` | No effect | Already handled by `RADV_DEBUG=nocompute` |
-| Dual GPU | tg **-25%** | PCIe split hurts MoE decode more than it helps |
+| **tg128** | **183.5 ± 1.0** | ~86% bandwidth utilization |
+| pp512 | 3032.6 ± 23.5 | |
+| pp1024 | 3009.0 ± 25.2 | |
+
+---
+
+## Benchmark Reproduction / 本地重现
+
+### llama-bench
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+cmake -B build -DGGML_VULKAN=ON -DGGML_CPU=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc) --target llama-bench
+
+# 35B MoE benchmark
+RADV_DEBUG=nocompute GGML_VK_VISIBLE_DEVICES=0 \
+  ./build/bin/llama-bench \
+    -m /path/to/35B-moe.gguf \
+    -n 512 -p 32 -ngl 999 -fa 1 -b 4096 -ub 512 -r 3
+
+# 27B dense benchmark
+RADV_DEBUG=nocompute GGML_VK_VISIBLE_DEVICES=0 \
+  ./build/bin/llama-bench \
+    -m /path/to/27B.gguf \
+    -n 512 -p 32 -ngl 999 -fa 0 -b 16384 -ub 2048 -r 3
+```
+
+### curl API test (35B)
+
+```bash
+curl http://localhost:8080/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "test", "max_tokens": 128, "temperature": 0}'
+```
+
+Check the `usage.time_per_output_token_ms` / `predicted_per_second` fields in the response.
+
+---
+
+## ✅ Optimizations That Work / 有效的优化项
+
+### Must-have for all models: `RADV_DEBUG=nocompute` & latest llama.cpp
+
+**Single most impactful setting for RDNA4 gfx1201 Vulkan.** Disables compute queue — routes all work through graphics queue, avoiding a performance regression on RADV.
+
+```yaml
+environment:
+  - GGML_VK_VISIBLE_DEVICES=0
+  - RADV_DEBUG=nocompute
+```
+
+Without this: ~120 t/s → With this: **~138 t/s** (+15%). Also pair with the **latest llama.cpp master** for `KHR_cooperative_matrix` support — older builds without it benchmark ~117-120 t/s vs **~165 t/s**.
+
+### ✅ For 27B Dense: MTP Speculative Decoding
+
+| Setting | tg Speedup |
+|---|---|
+| No MTP (baseline) | ~20 t/s |
+| **MTP (`--spec-type draft-mtp`, `--spec-draft-n-max 3`)** | **~42 t/s (2×)** |
+| Required pairing | `-b 16384 -ub 2048`, `--parallel 1`, `--flash-attn on` |
+
+### ✅ For 35B MoE: Latest llama.cpp + RADV_DEBUG=nocompute
+
+| Setting | tg Speedup |
+|---|---|
+| Old build, no RADV_DEBUG (baseline) | ~117-120 t/s |
+| Latest build + RADV_DEBUG | **~138 t/s (+15-20%)** |
+| llama-bench peak | **~165 t/s** |
+| MTP | **Regresses** (-24%) — do not use |
+
+### System-level
+
+```bash
+# PCIe ASPM performance mode — +~10% decode
+echo performance | sudo tee /sys/module/pcie_aspm/parameters/policy
+
+# GPU power to high — stable clock speed
+echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
+```
+
+Resets on reboot. See [`scripts/system-optimize.sh`](scripts/system-optimize.sh) for a persistent setup.
+
+---
+
+## ❌ Optimizations That Don't Work / 无效或负优化项
+
+| Optimization | 27B (dense) | 35B (MoE) | Reason |
+|---|---|---|---|
+| **MTP for MoE** | N/A | tg **-24%** (138→105) | MoE MTP head adds overhead; acceptance rate too low |
+| AMDVLK driver | pp degrades | pp degrades | Prefill drops significantly |
+| ROCm backend (HIP) | Slower | Slower | RDNA4 RADV Vulkan ~20% faster than ROCm HIP |
+| Turboquant (turbo2/3/4) | Slower | Slower | CPU decompression bottleneck, GPU util ~30% |
+| `GGML_VK_ALLOW_GRAPHICS_QUEUE=1` | No effect | No effect | Already covered by `RADV_DEBUG=nocompute` |
+| Dual GPU | tg **-25%** | tg **-25%** | PCIe split hurts decode more than it helps |
 
 ---
 
@@ -184,7 +244,7 @@ llama-server \
 git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 
-# Configure with Vulkan
+# Configure with Vulkan + CPU
 cmake -B build -DGGML_VULKAN=ON -DGGML_CPU=ON -DCMAKE_BUILD_TYPE=Release
 
 # Build the server binary
@@ -207,22 +267,35 @@ EOF
 docker build -t llama-cpp-vulkan .
 ```
 
-### Or use Docker Compose
+### Docker Compose
 
-See [`docker-compose.yml`](docker-compose.yml) for a complete ready-to-use example. Add `RADV_DEBUG=nocompute` to the `environment` section.
+See [`docker-compose.yml`](docker-compose.yml) for two configs:
+- `llama-35b` — MoE model, no MTP, `-b 4096 -ub 512`
+- `llama-27b` — Dense model, MTP enabled, `-b 16384 -ub 2048`
 
 ---
 
 ## Optimization Impact Summary / 优化效果汇总
 
-| Optimization | 35B MoE tg | 35B MoE pp | Notes |
+### 27B Dense Model
+
+| Optimization | tg | pp | Notes |
 |---|---|---|---|
-| **Use latest llama.cpp master** | +40% | +15% | `KHR_cooperative_matrix` support |
-| **`RADV_DEBUG=nocompute`** | +15% | Minor | RDNA4 gfx1201 must-have |
+| **MTP spec decoding** | **+100%** | — | Biggest single gain for dense models |
+| PCIe ASPM performance | +10% | +10% | Free, system-level |
+| GPU power high | stabilizes | stabilizes | Prevents throttle |
+| `--flash-attn on` + `-b 16384` | — | significant | Must use together |
+
+### 35B MoE Model
+
+| Optimization | tg | pp | Notes |
+|---|---|---|---|
+| **Latest llama.cpp master** | **+40%** | +15% | `KHR_cooperative_matrix` support |
+| **`RADV_DEBUG=nocompute`** | **+15%** | Minor | RDNA4 gfx1201 must-have |
 | PCIe ASPM performance | +10% | +10% | Free, system-level |
 | GPU power high | stabilizes | stabilizes | Prevents throttle |
 | `--flash-attn on` | negligible | significant | Standard recommendation |
-| MTP (`--spec-type draft-mtp`) | **-24%** | N/A | Only for dense models, not MoE |
+| MTP | **-24%** | N/A | Only for dense models |
 
 ---
 
