@@ -46,13 +46,18 @@
 | tg (no MTP) | ~20 | Memory-bandwidth bound dense model |
 | pp (1226 tokens) | ~525 | |
 
-#### After optimization (latest llama.cpp + RADV_DEBUG=nocompute, MTP `-b 16384 -ub 2048`)
+#### After optimization (latest llama.cpp + RADV_DEBUG=nocompute, MTP `-b 16384 -ub 2048`, `--spec-draft-n-max 3`)
 
-| Test | t/s | Speedup |
-|---|---|---|
-| **tg (MTP enabled)** | **~60** | **~3× vs no MTP** |
-| pp (short) | ~40-52 | |
-| MTP acceptance rate | 95–97% | Consistently high |
+| Context | Metrics | pp (t/s) | tg (t/s) |
+|---|---|---|---|
+| **Short** (pp=11) | gen=16 | 52 | 45 |
+| | gen=197 | 53-71 | 60-63 |
+| **Medium** (pp=35-170) | gen=16 | 110-117 | 57 |
+| | gen=256-512 | 53 | 55-61 |
+| **Long** (pp=490) | gen=16 | **489** | 55 |
+| | gen=256-512 | 52-69 | 59-60 |
+
+> **~3× speedup** vs no-MTP baseline (~20 t/s). MTP acceptance rate 95–97%.
 
 #### Optimal llama-server flags (27B)
 
@@ -91,14 +96,18 @@ llama-server \
 | pp32 | 521.6 ± 38.7 | Short prefill |
 | pp512 | 2901.2 ± 97.8 | Medium prefill |
 
-#### Real server benchmark (OpenAI-compatible API)
+#### Full server benchmark — llama.cpp build 9870, no MTP
 
-| Run | Predicted t/s | Tokens |
-|---|---|---|
-| Run 1 | 135.4 | 36 |
-| Run 2 | 130.8 | 36 |
-| Run 3 | 137.9 | 36 |
-| **Average** | **~138** | |
+| Context | Metrics | pp (t/s) | tg (t/s) |
+|---|---|---|---|
+| **Short** (pp=11) | gen=16 | 145 | 106 |
+| | gen=161-168 | 197 | 137-145 |
+| **Medium** (pp=170) | gen=16 | 500 | 133 |
+| | gen=256 | 196 | 143 |
+| | gen=512 | 216 | 157 |
+| **Long** (pp=490) | gen=16 | **2273** | 150 |
+| | gen=256 | 219 | 155 |
+| | gen=512 | 243 | **160** |
 
 #### Optimization Timeline (35B MoE)
 
