@@ -1,19 +1,60 @@
 services:
-  llama-server:
-    image: llama-cpp-mtp:vulkan          # custom build with draft-mtp support
-    container_name: llama-server
+  # ============================================
+  # Configuration A: 35B MoE (no MTP)
+  # Best for Qwen3.6-35B-A3B / similar MoE models
+  # Build 9870+, RADV_DEBUG=nocompute, flash-attn
+  # ============================================
+  llama-35b:
+    image: llama-cpp-vulkan:latest   # your custom Vulkan build
+    container_name: llama-35b
     restart: unless-stopped
     ports:
       - "30001:8080"
     volumes:
-      - /path/to/your/models:/models     # change to your model directory
+      - /path/to/your/models:/models  # change to your model directory
     devices:
       - /dev/dri:/dev/dri
     group_add:
       - video
     environment:
       - GGML_VK_VISIBLE_DEVICES=0
-      - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json
+      - RADV_DEBUG=nocompute           # REQUIRED for RDNA4 gfx1201
+    command: >
+      --model /models/Qwen3.6-35B-A3B-Q4_K.gguf
+      --alias Qwen3.6-35B-Q4K
+      --host 0.0.0.0
+      --port 8080
+      --n-gpu-layers 999
+      --ctx-size 32768
+      --parallel 1
+      --flash-attn on
+      -b 4096
+      -ub 512
+      --cache-type-k q4_0
+      --cache-type-v q4_0
+      --api-key your-api-key
+      --metrics
+
+  # ============================================
+  # Configuration B: 27B Dense (with MTP)
+  # Best for Qwen3.6-27B / similar dense models
+  # MTP speculative decoding gives ~2× speedup
+  # ============================================
+  llama-27b:
+    image: llama-cpp-vulkan:latest
+    container_name: llama-27b
+    restart: unless-stopped
+    ports:
+      - "30002:8080"
+    volumes:
+      - /path/to/your/models:/models
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      - GGML_VK_VISIBLE_DEVICES=0
+      - RADV_DEBUG=nocompute           # REQUIRED for RDNA4 gfx1201
     command: >
       --model /models/Qwen3.6-27B-Q4_K_M.gguf
       --alias Qwen3.6-27B-Q4K_M
