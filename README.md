@@ -46,12 +46,12 @@
 | tg (no MTP) | ~20 | Memory-bandwidth bound dense model |
 | pp (1226 tokens) | ~525 | |
 
-#### After optimization (MTP enabled, `-b 16384 -ub 2048`, `--flash-attn on`)
+#### After optimization (latest llama.cpp + RADV_DEBUG=nocompute, MTP `-b 16384 -ub 2048`)
 
 | Test | t/s | Speedup |
 |---|---|---|
-| **tg (MTP enabled)** | **~42** | **~2× vs no MTP** |
-| pp (1226 tokens, ctx 204800) | ~525 | same |
+| **tg (MTP enabled)** | **~60** | **~3× vs no MTP** |
+| pp (short) | ~40-52 | |
 | MTP acceptance rate | 95–97% | Consistently high |
 
 #### Optimal llama-server flags (27B)
